@@ -3,18 +3,23 @@
 require 'twitter'
 require 'dotenv'
 require 'pushover'
+require 'logger'
 
 Dotenv.load
+$logger = Logger.new(STDOUT)
+WATCH_LIST = ENV.fetch("WATCH_LIST")
 
-client = Twitter::REST::Client.new do |config|
-  config.consumer_key        = ENV.fetch("TWITTER_API_KEY")
-  config.consumer_secret     = ENV.fetch("TWITTER_API_SECRET")
-  config.access_token        = ENV.fetch("TWITTER_ACCESS_TOKEN")
-  config.access_token_secret = ENV.fetch("TWITTER_ACCESS_SECRET")
-end
+config = {
+  consumer_key:        ENV.fetch("TWITTER_API_KEY"),
+  consumer_secret:     ENV.fetch("TWITTER_API_SECRET"),
+  access_token:        ENV.fetch("TWITTER_ACCESS_TOKEN"),
+  access_token_secret: ENV.fetch("TWITTER_ACCESS_SECRET")
+}
+stream_client = Twitter::Streaming::Client.new(config)
+rest_client = Twitter::REST::Client.new(config)
 
 def push_notification(tweet)
-  puts "#{tweet.user.screen_name}: #{tweet.full_text}"
+  $logger.info "#{tweet.user.screen_name}: #{tweet.full_text}"
   pushover_client = Pushover.notification(
     message: tweet.full_text,
     title: "An update from #{tweet.user.screen_name}",
@@ -24,20 +29,30 @@ def push_notification(tweet)
   )
 end
 
-$seen_ids = Set.new
-# tweets = client.user_timeline("ATLAirport")
-# require 'pry'; binding.pry
-
-while 1
-  ENV.fetch("WATCHED_USERS").split(",").each do |user|
-    client.user_timeline(user).take(5).each do |tweet|
-      next if tweet.reply?
-      next if $seen_ids.include? tweet.id
-
-      $seen_ids << tweet.id
-      push_notification(tweet)
-    end
+# Monkey-patch the Twitter gem to pull 140+ character tweets instead of the truncated version.
+class Twitter::Tweet
+  def full_text
+    attrs[:extended_tweet][:full_text]
   end
+end
 
-  sleep 5
+watch_list_ids = rest_client.list_members(WATCH_LIST).attrs[:users].map{ |user| user[:id].to_s }.join(",")
+stream_client.filter(follow: watch_list_ids, tweet_mode: "extended") do |object|
+  case object
+  when Twitter::Tweet
+    push_notification(object)
+  when Twitter::DirectMessage
+    puts "It's a direct message!"
+    p object
+  when Twitter::Streaming::StallWarning
+    warn "Falling behind!"
+  when Twitter::Streaming::DeletedTweet
+    puts "Twitter::Streaming::DeletedTweet"
+    p object
+  when Twitter::Streaming::Event
+    puts "Twitter::Streaming::Event"
+    p object
+  when Twitter::Streaming::FriendList
+    puts "Twitter::Streaming::FriendList"
+  end
 end
